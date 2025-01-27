@@ -1,0 +1,632 @@
+---
+title: | 
+ | Practicum 1
+author: | 
+ | Merim Tojaga
+ | Northeastern University
+ | DA 5030: Intro to Data Mining/Machine Learning
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: pdf_document
+---
+### Libraries Used in Practicum.
+
+```{r Library, message=FALSE}
+library(dplyr)
+library(tidyverse)
+library(scales)
+library(ggplot2)
+library(mosaic)
+library(kableExtra)
+library(class)
+library(gmodels)
+library(TTR)
+library(forecast)
+
+```
+
+## 1 / Predicting Life Expectancy.
+
+### Importing Data.
+
+```{r Getting Data}
+url <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/LifeExpectancyData.csv"
+
+df <- read.csv(url)
+```
+
+```{r Data Exploration, include=FALSE}
+summary(df)
+```
+
+### 1.1 / Analysis of Per Capita Mortality.
+
+* Question 2: "Developing" vs "Developed" countries Bar Chart.
+
+```{r echo=FALSE}
+df_clean <- df %>%
+  drop_na(infant.deaths, Adult.Mortality, Population) %>%
+  mutate(infant_mortality = (infant.deaths/Population),
+         adult_mort = (Adult.Mortality/1000),
+         total_mort = (infant_mortality * Population + adult_mort * Population) / Population)
+
+df_average <- df_clean %>%
+  group_by(Status) %>%
+  summarise(average_mort_rate = mean(total_mort, na.rm = TRUE))
+
+ggplot(df_average, aes(x=Status, y = average_mort_rate, fill = Status)) + geom_col() + theme_minimal() + scale_y_continuous(labels = scales::percent_format(accuracy =1, scale = 100)) + labs(title = "Average Per Capita Mortality Rates",
+       x = "Country Status",
+       y = "Average Mortality Rate (as %)")
+```
+
+We can see the massive difference in developing nations, as they have a much higher mortality rate than developed nations. Some of the values are very high making me assume I made a mistake in data.
+
+* Question 3: Determine the difference in mortality using appropriate test.
+
+```{r t-test distribution}
+#first we check if they are normally distributed
+
+developed <- df_clean[df_clean$Status == "Developed",]
+dped_mort <- developed$total_mort
+developing <- df_clean[df_clean$Status == "Developing",]
+dping_mort <- developing$total_mort
+
+#Both groups are normally distributed.
+shapiro_val_dped <- shapiro.test(dped_mort)
+pval_dped <- shapiro_val_dped$p.value
+shapiro_val_dping <- shapiro.test(dping_mort)
+pval_dping <- shapiro_val_dping$p.value
+wilcox_results <- wilcox.test(dped_mort, dping_mort)
+wil_pval <- wilcox_results$p.value
+```
+
+To check the difference in mortality rate between the countries we first have to check if our data is normally distributed. We can see Developed Nations have a p-value of `r pval_dped`, & Developing Nations with a p-value of `r pval_dping`  which are both below 0.05 meaning our data is not normally distributed. The appropriate t-test for this data is the Wilicox rank-sum test. Our results from the wilicox test were a p-value `r wil_pval` which indicates a significant difference in distribution in mortality rate between Developed and Developing Nations.
+
+* Question 4: Test the normality of the column "Life expectancy".
+
+```{r echo=FALSE}
+Life_expectancy <- df$Life.expectancy
+
+life_shap <- shapiro.test(Life_expectancy)
+life_pval <- life_shap$p.value
+```
+
+Conducting a shapiro test on the column "Life expectancy" in our data frame we can see that the p-value is `r life_pval` which is far under 0.05 ultimately meaning the data in not normally distributed.
+
+### 1.2 / Identification of Outliers.
+
+```{r Creating Function}
+calculate_z_score <- function(col) {
+  mean_col <- mean(col, na.rm = TRUE)
+  sd_col <- sd(col, na.rm = TRUE)
+  z_scores <- (col - mean_col) / sd_col
+}
+```
+
+We can apply the above function to all columns 
+
+```{r Implementating Function, echo=FALSE}
+above_zscore_df <- df %>%
+   select(-Status, -Country) %>%
+  mutate(across(everything(), calculate_z_score))
+```
+
+```{r Keeping Track of All Counts of outliers, echo=FALSE}     
+outlier_mask <- abs(above_zscore_df) > 2.8
+
+outlier_counts <- colSums(outlier_mask, na.rm = TRUE)
+outlier_df <- df[outlier_mask, , drop = FALSE]
+outlier_counts_df <- data.frame(Column = names(outlier_counts), OutlierCount = outlier_counts)
+
+
+kable(outlier_counts_df, row.names = FALSE, align = "c") %>%
+  kable_styling(font_size = 12)
+```
+
+The Table above showcases the number of outliers each column has. These outliers are more than 2.8 Standard deviations from the mean. Hepatitus.B defeinetly contains a lot of outliers.
+
+```{r Life Expectancy, echo=FALSE}
+life_outlier_mask <- outlier_mask[, "Life.expectancy"] 
+outlier_values_life <- df$Life.expectancy[life_outlier_mask]
+outlier_values_life_df <- data.frame(OutlierValues = outlier_values_life)
+outlier_values_numeric <- outlier_values_life_df$OutlierValues
+fav_stats_result <- fav_stats(outlier_values_numeric)
+
+kable(fav_stats_result, align = "c") %>%
+  kable_styling(font_size = 12)
+
+mean_life <- round(fav_stats_result$mean)
+```
+
+The Table above goes into descriptive statistics on the outliers for Life Expectancy. We can see that all of the outliers are very low, indicating an average age of `r mean_life`. The values like min, max and median can be observed above in the kable table.  
+
+I would not use a trimmed mean for Life Expectancy because we are only talking about 5 values that are all low, if we used a trimmed mean we would cut into values that are high as well. In this case, we need to be careful about removing outliers about life expectancy when we are trying to calculate mortallity. I would remove all 5 of the outliers as they could potentially skew the data. In this case a country with a life expectancy in 40's is definitely going to skew data on mortality.
+
+
+```{r Managing Outliers, echo=FALSE}
+drf <- abs(above_zscore_df) < 2.8
+
+filtered_df <- df[rowSums(drf) == ncol(above_zscore_df), ]
+
+sd_cleaned_df <- na.omit(filtered_df)
+```
+
+### 1.3 / Data Preparation.
+
+* Question 1: Normalize all numeric columns using z-score standardization.
+
+```{r echo=FALSE}
+z_cleaned_df <- sd_cleaned_df %>%
+  mutate(across(-c(Status, Country), calculate_z_score))
+```
+
+Normalizing the data above allows us to compare the data easily. As it takes things that are very far apart numerically and standardize them, making them useful for algorithms.
+
+* Question 2: Add a new, derived feature to the dataframe called "disease"
+
+```{r Adding Disease}
+sd_cleaned_df <- sd_cleaned_df %>%
+  group_by(Country) %>%
+  mutate(Disease = rowSums(pick(Hepatitis.B, Measles, Polio, HIV.AIDS, Diphtheria), na.rm = TRUE)) %>%
+  ungroup()
+```
+
+```{r Z_score_disease, echo=FALSE}
+z_cleaned_df <- sd_cleaned_df %>%
+  mutate(across(-c(Status, Country), calculate_z_score))
+```
+
+### 1.4 / Sampling Training and Validation Data.
+
+```{r }
+shuffled_data <- z_cleaned_df %>% sample_frac(size = 1)
+
+validation_data <- shuffled_data %>%
+  group_by(Status) %>%
+  slice_sample(prop = .15) %>%
+  ungroup()
+
+training_data <- shuffled_data %>%
+  filter(!row_number() %in% row_number(validation_data))
+```
+
+### 1.5 / Predictive Modeling. 
+
+```{r message=FALSE}
+anyNA(z_cleaned_df)
+```
+
+```{r results='hide',echo=FALSE}
+k <- 6
+
+predict_train <- training_data %>%
+  select(-Country, -Status)
+predict_val <- validation_data %>%
+  select(-Country, -Status)
+
+new_data_point <- data.frame(
+  Life.expectancy = 67.4,
+  Adult.Mortality = 293,
+  infant.deaths = 4,
+  Alcohol = 2.68,
+  percentage.expenditure = 40.7,
+  Hepatitis.B = 40,
+  Measles = 671,
+  BMI = 14.2,
+  GDP = 687,
+  under.five.deaths = 211,
+  Polio = 20,
+  Diphtheria = 97,
+  Disease = 828,
+  thinness..1.19.years = 2.8,
+  thinness.5.9.years = 2.9, 
+  Income.composition.of.resources = 0.692,
+  Year = 2008,
+  Schooling = 12.5,
+  Population = 1327439,
+  HIV.AIDS = 0.1,
+  Total.expenditure = 5.9
+)
+```
+
+```{r scaling new data point, echo=FALSE}
+z_scaling_df <- sd_cleaned_df %>%
+  select(-Country, -Status)
+
+means <- colMeans(z_scaling_df, na.rm = TRUE)
+sds <- apply(z_scaling_df, 2, sd, na.rm = TRUE)
+
+scale_z <- function(col, means, sds) {
+  (col - means) / sds
+}
+
+relevant_columns <- c("Year", "Life.expectancy", "Adult.Mortality", "infant.deaths", "Alcohol", "percentage.expenditure", "Hepatitis.B", "Measles", "BMI", "under.five.deaths", "Polio", "Total.expenditure", "Diphtheria", "HIV.AIDS", "GDP", "Population", "thinness..1.19.years", "thinness.5.9.years", "Income.composition.of.resources", "Schooling", "Disease")
+
+relevant_means <- means[relevant_columns]
+relevant_sds <- sds[relevant_columns]
+
+
+scaled_columns <- lapply(relevant_columns, function(col_name) {
+  scale_z(new_data_point[[col_name]], relevant_means[col_name], relevant_sds[col_name])
+})
+
+new_data_scaled<- data.frame(scaled_columns)
+
+predicted_status <- knn(predict_train, new_data_scaled, training_data$Status, k = 6)
+
+chr_predicted_status <- as.character(predicted_status)
+```
+
+I used the kNN algorithm to make the prediction analysis. I had to prepare my data using the z score standardization (In order to give the algorithm values to make better predictions with), and then make sure I had no NA values. From there I split the data set randomly into a 85% Training data and 15% Validation data. I used kNN because of my experience with it in a previous assignment for this class, I understand that it is an easy to use analysis tool that can help me in making predictions for future datasets. My prediction based on this data would be a value of "Developing" soley based on under 5 deaths, as I think I remember seeing that pediatric care is something many developing nations lack.
+
+After kNN: The predicted status is `r chr_predicted_status`. Which definitely did not surpise me, I looked at the factor of infant deaths and thought it would be pretty hard to see that in a developed country.
+
+### 1.6 / Model Accuracy.
+
+```{r}
+k_values <- 3:10
+accuracies <- numeric(length(k_values))
+
+
+for (i in seq_along(k_values)) {
+  k <- k_values[i]
+  predicted_labels <- knn(train = predict_train, test = predict_val, cl = training_data$Status, k = k)
+  accuracies[i] <- mean(predicted_labels == validation_data$Status) * 100 # 
+}
+
+results <- data.frame(k = k_values, accuracy = accuracies)
+
+
+ggplot(results, aes(x = k, y = accuracy)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "k-NN Accuracy vs. k Value",
+       x = "Number of Neighbors (k)",
+       y = "Accuracy (%)") +
+  theme_minimal()
+```
+
+## 2 / Predicting Shucked Weight of Abalones using Regression kNN
+
+```{r Remove All Lists/DF created from previous Question, echo=FALSE}
+rm(list = ls())
+```
+
+### Getting Dataset
+
+```{r Importing Data, echo=FALSE}
+url <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/abalone.csv"
+abalone_df <- read.csv(url)
+```
+
+### 2.2 / Encoding Categorical Variables
+
+```{r Seperate Data}
+target_data <- abalone_df$ShuckedWeight
+
+training_data <- abalone_df %>%
+  select(-ShuckedWeight)
+```
+
+```{r for use later when transfering scaled values, echo=FALSE}
+#we will use this for question 4 and 6
+for_scaling <- abalone_df %>%
+  select(-Sex)
+```
+
+* Question 2:  Encode all categorical columns using an encoding scheme of your choice.
+
+```{r Checking Levels of $Sex, echo=FALSE}
+training_data$Sex <- as.factor(training_data$Sex)
+```
+
+```{r Dummy Encoding}
+# Dummy Code Sex
+training_data$sexID_F <- ifelse(training_data$Sex == "F",1,0)
+training_data$sexID_I <- ifelse(training_data$Sex == "I",1,0)
+```
+
+I chose to use Dummy Encoding (also known as One Hot Encoding) as I have experience with it in DA5020 and I know it is very simple to manage. I only saw one candidate for a categorical type of encoding like this in the "Sex" column. The number of rings column seemed like it was connected to age, and had a lot of values so I assumed it was better to normalize this column. The Dummy encoding in this code asigns a zero or one based on the column value, because we have 3 levels in the "Sex" column I only needed two ;dummy encodings' because the computer is smart enough to recognize that values that aren't taken by "F" or "I" are taken by "M".
+
+```{r Removing Column, echo=FALSE}
+# Remove the Factor Column of Sex.
+training_data <- training_data %>%
+  select(-Sex)
+```
+
+* Question 3: Normalize appropriate columns in train_data using min-max normalization. 
+
+```{r Normalization Function}
+# Introduce my min-max normalization function. 
+calculate_min_max <- function(col) {
+  min_col <- min(col, na.rm = TRUE)
+  max_col <- max(col, na.rm = TRUE)
+  min_max_norm <- (col - min_col) / (max_col - min_col)
+}
+```
+
+```{r Normalizing Continous data, echo=FALSE}
+# Applying function to my data using dplyr pipe
+training_data <- training_data %>%
+  mutate(
+    Length = calculate_min_max(Length),
+    Diameter = calculate_min_max(Diameter),
+    Height = calculate_min_max(Height),
+    VisceraWeight = calculate_min_max(VisceraWeight),
+    ShellWeight = calculate_min_max(ShellWeight),
+    WholeWeight = calculate_min_max(WholeWeight),
+    NumRings = calculate_min_max(NumRings)
+  )
+```
+
+* Question 4: Build a function called knn.reg that averages the value of the "Shucked Weight" of the 'k' nearest neighbors using a simple average.
+
+```{r knn Reg Function, echo=FALSE}
+# Simple average function for regression
+knn_mean <- function(x) {
+  return(mean(x, na.rm = TRUE))
+}
+
+# Euclidean distance function using vectorized calculations
+knn_dist <- function(train, u) {
+  train <- as.matrix(train)
+  u <- as.matrix(u)
+  dists <- sqrt(rowSums((train - matrix(rep(u, nrow(train)), nrow(train), byrow = TRUE))^2))
+  return(dists)
+}
+
+# Closest k neighbors function
+k.closest <- function(neighbors, k) {
+  ordered_neighbors <- order(neighbors)
+  return(ordered_neighbors[1:k])
+}
+
+# KNN regression function
+knn.reg <- function(new_data, target_data, train_data, k = 5) {
+  predicted_values <- numeric(nrow(new_data))
+  train_data <- as.matrix(train_data)
+  new_data <- as.matrix(new_data)
+
+  # Calculate distances for all new data points
+  for (j in 1:nrow(new_data)) {
+    u <- new_data[j, , drop = FALSE]
+    ds <- knn_dist(train_data, u)
+    f <- k.closest(ds, k)
+    predicted_values[j] <- knn_mean(target_data[f])
+  }
+  return(predicted_values)
+}
+```
+
+We have to create a random test sample, so we need to complete the process of separating the the shucked weight and normalizing/encoding the values.
+
+```{r Creating a Random Sample Size, echo=FALSE}
+# Random Sample
+set.seed(123)
+new_data_sample <- abalone_df %>%
+  sample_n(size = round(0.30 * n()))
+
+# Dummy Encoding New Sample
+new_target_sample <- new_data_sample$ShuckedWeight
+new_data_sample$sexID_F <- ifelse(new_data_sample$Sex == "F",1,0)
+new_data_sample$sexID_I <- ifelse(new_data_sample$Sex == "I",1,0)
+```
+
+```{r Min/max normalizing New Data Sample, echo=FALSE}
+# Here w reference for_scaling data set which is used to find the min and max.
+
+#Min/Max Normalizing new Sample Using values from original training data.
+min_values <- sapply(for_scaling, min, na.rm = TRUE)
+max_values <- sapply(for_scaling, max, na.rm = TRUE)
+
+
+relevant_min <- min_values[c("Length", "Diameter", "Height", "WholeWeight", "VisceraWeight", "ShellWeight", "NumRings")]
+relevant_max <- max_values[c("Length", "Diameter", "Height", "WholeWeight", "VisceraWeight", "ShellWeight", "NumRings")]
+```
+
+```{r Scale Function, echo=FALSE}
+# Scale function to use min/max in the new sample data
+scale_min_max <- function(col, min_val, max_val) {
+  (col - min_val) / (max_val - min_val)
+}
+```
+
+```{r Applying Function, echo=FALSE}
+scaled_columns <- sapply(names(relevant_min), function(col_name) {
+  scale_min_max(new_data_sample[[col_name]], relevant_min[col_name], relevant_max[col_name])
+})
+
+scaled_data <- data.frame(scaled_columns)
+
+# Combine the scaled data with the original encoded values
+new_data_sample <- cbind(
+  scaled_data,
+  new_data_sample[, c("sexID_I", "sexID_F")]
+)
+```
+
+```{r Testing Our kNN function}
+# Function Running 
+k <- 5
+predictions <- knn.reg(new_data_sample, target_data, training_data, k)
+
+mae <- mean(abs(predictions - new_target_sample))
+rmse <- sqrt(mean((predictions - new_target_sample)^2))
+
+
+mae <- percent(mae/mean(new_target_sample))
+rmse <- percent(rmse/mean(new_target_sample))
+```
+
+Original KNN Regression function took an hour to run, so I researched techniques on efficiency and was able to create a frankenstien of code from the professor, the text book, and editing the code. The new code can run efficiently and effectively having a Root Mean Squared Error value of `r rmse` and a Mean Absolute Error of `r mae` these values are pretty good considering that we are measuring something that can have a lot of variation like weight. 
+
+* Question 5: Forecast the Shucked Weight of this new abalone using your regression kNN using k= 3
+
+```{r Preparing New data, echo=FALSE}
+new_abalone <- data.frame(
+  Sex = "M",
+  Length = 0.38,
+  Diameter = 0.490,
+  Height = 0.231,
+  WholeWeight = 0.4653,
+  VisceraWeight =  0.0847,
+  ShellWeight = 0.17,
+  NumRings =  11
+)
+
+new_abalone$Sex <- as.factor(new_abalone$Sex)
+
+# Dummy Code Sex
+new_abalone$sexID_F <- ifelse(new_abalone$Sex == "F",1,0)
+new_abalone$sexID_I <- ifelse(new_abalone$Sex == "I",1,0)
+
+new_abalone <- new_abalone %>%
+  select(-Sex)
+
+```
+
+```{r normalizing new data using training data min/max scores, echo=FALSE}
+# Same process as question 4. We have to use min/max from training set.
+
+#Normalizing Data Using Min Max from Training Data set
+scaled_columns <- sapply(names(relevant_min), function(col_name) {
+  scale_min_max(new_abalone[[col_name]], relevant_min[col_name], relevant_max[col_name])
+})
+
+scaled_data <- data.frame(scaled_columns)
+new_abalone[1, c("Length", "Diameter", "Height", "WholeWeight", "VisceraWeight", "ShellWeight", "NumRings")] <- scaled_columns
+```
+
+
+```{r}
+prediction_new_sample <- knn.reg(new_abalone, target_data, training_data, 3)
+samp <- round(prediction_new_sample, 4)
+```
+
+Given the information about the sample our model predict a Shucked Weight of `r samp`. I am resonalby confident in this answer given our low RMSE and MAE.
+
+* Question 6: Calculate the Mean Squared Error (MSE) using a random sample of 20% of the data set as test data.
+
+```{r Second_test_sample, echo=FALSE}
+# Similar to question 4 just using a samller set.
+
+set.seed(123)
+second_data_sample <- abalone_df %>%
+  sample_n(size = round(0.20 * n()))
+
+# Dummy Encoding New Sample
+second_data_target <- second_data_sample$ShuckedWeight
+second_data_sample$sexID_F <- ifelse(second_data_sample$Sex == "F",1,0)
+second_data_sample$sexID_I <- ifelse(second_data_sample$Sex == "I",1,0)
+```
+
+```{r Normalizing Second Data, echo=FALSE}
+scaled_columns <- sapply(names(relevant_min), function(col_name) {
+  scale_min_max(second_data_sample[[col_name]], relevant_min[col_name], relevant_max[col_name])
+})
+
+scaled_data <- data.frame(scaled_columns)
+
+# Combine the scaled data with the original encoded values
+second_data_sample <- cbind(
+  scaled_data,
+  second_data_sample[, c("sexID_I", "sexID_F")]
+)
+```
+
+```{r KNN for New Data}
+#Running kNN function on the data 
+predictions_two <- knn.reg(second_data_sample, target_data, training_data, 3)
+mse <- mean((second_data_target - predictions_two)^2)
+```
+
+For a random sample of 20% of the original data we got a MSE `r mse`. This value is low even with our values being decimals. It indicates our model is fairly accurate in making predictions. Hopefully it is not over fitting.
+
+## 3 / Forecasting Future Sales Price
+
+```{r Erase Previous Data and import New Data}
+rm(list = ls())
+
+url <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/HomeSalesUFFIData.csv"
+
+HomeSales_df <- read.csv(url)
+```
+
+```{r For embedding in first section, echo=FALSE}
+HomeSales_df <- na.omit(HomeSales_df)
+
+total_sales <- length(HomeSales_df$Observation)
+
+min_year <- min(HomeSales_df$YearSold)
+
+max_year <- max(HomeSales_df$YearSold)
+
+medain_sale <- dollar(median(as.numeric(sub(",", "",HomeSales_df$SalesPrice, fixed = TRUE))))
+
+trim_mean <- round(mean(as.numeric(sub(",", "",HomeSales_df$SalesPrice, fixed = TRUE)), trim = 0.1))
+
+sd_sales <- round(sd(as.numeric(sub(",", "",HomeSales_df$SalesPrice, fixed = TRUE))))
+```
+
+We obtained a data set with a total of `r total_sales` sales transactions for the years from `r min_year` to `r max_year`. The median sales price for the entire time frame was `r medain_sale`, while the 10% trimmed mean was `r trim_mean` (sd = `r sd_sales`). Broken down by year, we have the following number of sales, plus the 10% trimmed mean and median sales prices per year
+
+```{r For Table, echo=FALSE}
+sale_table <- HomeSales_df %>%
+  group_by(YearSold) %>%
+  summarise("Homes Sold" = n(), "Average Sales Price (10% Trim)" = dollar(mean(as.numeric(gsub(",", "", SalesPrice)),trim = 0.1, na.rm = TRUE)),
+            "Median Sale Price" = dollar(median(as.numeric(gsub(",", "", SalesPrice)), na.rm = TRUE)))
+
+kable(sale_table, row.names = FALSE, align = "c") %>%
+  kable_styling(font_size = 12)
+```
+
+As the graph below shows, the median sales price per year has been.
+
+```{r Graph For question 3, echo=FALSE}
+ggplot(sale_table, aes(x = as.factor(YearSold), y = `Median Sale Price`)) + geom_col() + labs(
+       x = "Year",
+       y = "Median Sale Price") +
+  theme_minimal()
+```
+
+```{r Weighted moving average, echo=FALSE}
+weight <- c(0.7,0.2,0.1)
+
+# I started using another table because when I formatted the previous information I changed the values I needed into dollar format, and that was causing headaches in my current code.
+
+extra_table <- HomeSales_df %>%
+  group_by(YearSold) %>%
+  summarise(mean = mean(as.numeric(gsub(",", "", SalesPrice)),trim = 0.1, na.rm = TRUE))
+
+last_three <- extra_table[8:6,2]
+sw <- weight * last_three
+F <- sum(sw)/sum(weight)
+```
+
+```{r linnear regression, echo=FALSE}
+trend.model <- lm(extra_table$mean ~ extra_table$YearSold)
+intercept <- -35260991.95
+year_modifyer <- 17568.87
+
+model_prediction <- function(year) {
+  result <- intercept + (year * year_modifyer)
+  print(result)
+}
+
+lr <- model_prediction(2024)
+
+predictor <- dollar((lr+F)/2)
+```
+
+```{r pools and A/C, echo=FALSE}
+x <- HomeSales_df[HomeSales_df$HasPool == 1, ]
+
+earliest <- HomeSales_df[HomeSales_df$Observation == 93, ]
+earliest_year <- earliest$YearSold
+earliest_price <- earliest$SalesPrice
+
+latest <- HomeSales_df[HomeSales_df$Observation == 94, ]
+latest_year <- latest$YearSold
+latest_price <- latest$SalesPrice
+```
+
+Using both a weighted moving average forecasting model that averages the prior 3 years (with weights of 0.7, 0.2, and 0.1) and a linear regression trend line model, we predict next year's average sales price to be around `r predictor` (average of the two forecasts). The average home price of homes with both pools and air conditioning changed from $`r earliest_price` in `r earliest_year` (earliest year for which data is available) to $`r latest_price` in `r latest_year` (most recent year's sales data).
